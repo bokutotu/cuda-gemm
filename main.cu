@@ -40,44 +40,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "Dims: N=" << dims.N << " M=" << dims.M << " K=" << dims.K
-              << (no_cpu ? " (CPU skipped)" : "") << "\n";
-
     const auto data = run_benchmarks(dims, /*seed=*/42, /*do_cpu=*/!no_cpu);
-    const auto val  = validate_outputs(data, 1e-2f, /*have_cpu=*/!no_cpu);
 
-    if (!no_cpu) {
-        std::cout << "CPU time (avg): " << data.cpu_ms << " ms\n";
-    } else {
-        std::cout << "CPU time (avg): (skipped)\n";
-    }
-    std::cout << "GPU naive time (avg): " << data.naive_ms << " ms\n";
-    std::cout << "GPU shared time (avg): " << data.shared_ms << " ms\n";
-    std::cout << "GPU shared(float4) time (avg): " << data.shared4_ms << " ms\n";
-    std::cout << "GPU cuBLAS time (avg): " << data.cublas_ms << " ms\n";
+    print_results(data);
 
-    if (!no_cpu) {
-        std::cout << "CPU vs Naive -> mismatches=" << val.mis_cpu_naive
-                  << ", max_abs_err=" << val.err_cpu_naive << "\n";
-        std::cout << "CPU vs Shared -> mismatches=" << val.mis_cpu_shared
-                  << ", max_abs_err=" << val.err_cpu_shared << "\n";
-        std::cout << "CPU vs Shared4 -> mismatches=" << val.mis_cpu_shared4
-                  << ", max_abs_err=" << val.err_cpu_shared4 << "\n";
-        std::cout << "CPU vs cuBLAS  -> mismatches=" << val.mis_cpu_cublas
-                  << ", max_abs_err=" << val.err_cpu_cublas << "\n";
-    }
-    std::cout << "Naive vs Shared -> mismatches=" << val.mis_naive_shared
-              << ", max_abs_err=" << val.err_naive_shared << std::endl;
-    std::cout << "Naive vs Shared4 -> mismatches=" << val.mis_naive_shared4
-              << ", max_abs_err=" << val.err_naive_shared4 << "\n";
-    std::cout << "Shared vs Shared4 -> mismatches=" << val.mis_shared_shared4
-              << ", max_abs_err=" << val.err_shared_shared4 << std::endl;
-    std::cout << "Naive vs cuBLAS  -> mismatches=" << val.mis_naive_cublas
-              << ", max_abs_err=" << val.err_naive_cublas << "\n";
-    std::cout << "Shared vs cuBLAS -> mismatches=" << val.mis_shared_cublas
-              << ", max_abs_err=" << val.err_shared_cublas << "\n";
-    std::cout << "Shared4 vs cuBLAS-> mismatches=" << val.mis_shared4_cublas
-              << ", max_abs_err=" << val.err_shared4_cublas << std::endl;
-
-    return val.ok ? 0 : 1;
+    bool ok = true;
+    for (const auto& r : data.results) ok = ok && (r.mismatches == 0);
+    return ok ? 0 : 1;
 }
