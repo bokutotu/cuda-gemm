@@ -3,27 +3,26 @@
 #include <cublas_v2.h>
 #include "bench_utils.h"
 
-// Row-major GEMM using cuBLAS (which is column-major):
-// C[n,k] = A[n,m] x B[m,k]
-// We compute this by treating row-major buffers as column-major of transposed shapes.
-// Mapping: call C_col(KxN) = B_col(KxM) * A_col(MxN)
+// Row-major GEMM using cuBLAS (column-major API)
+// BLAS-style shapes: C[M,N] = A[M,K] x B[K,N]
+// Row-major trick: (C_rm)^T = B_rm^T * A_rm^T →
+// call col-major: C_col(NxM) = B_col(NxK) * A_col(KxM)
 inline void gemm_cublas(cublasHandle_t h,
                         const float* dA, const float* dB, float* dC,
-                        int n, int m, int k) {
+                        int m, int n, int k) {
     const float alpha = 1.0f, beta = 0.0f;
     // In cuBLAS column-major API: C = alpha*op(A)*op(B) + beta*C where
-    // A: (K x M) -> use B buffer with no transpose
-    // B: (M x N) -> use A buffer with no transpose
-    // C: (K x N) -> use C buffer
+    // A: (N x K) -> use B buffer with no transpose
+    // B: (K x M) -> use A buffer with no transpose
+    // C: (N x M) -> use C buffer
     checkCublas(
         cublasSgemm(h,
                     CUBLAS_OP_N, CUBLAS_OP_N,
-                    /*m=*/k, /*n=*/n, /*k=*/m,
+                    /*m=*/n, /*n=*/m, /*k=*/k,
                     &alpha,
-                    /*A=*/dB, /*lda=*/k,
-                    /*B=*/dA, /*ldb=*/m,
+                    /*A=*/dB, /*lda=*/n,
+                    /*B=*/dA, /*ldb=*/k,
                     &beta,
-                    /*C=*/dC, /*ldc=*/k),
+                    /*C=*/dC, /*ldc=*/n),
         "cublasSgemm");
 }
-

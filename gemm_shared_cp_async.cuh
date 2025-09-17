@@ -5,13 +5,13 @@
 #endif
 
 // cp.async-based ping-pong GEMM for SM80+
-// Row-major: C[n,k] = A[n,m] x B[m,k]
+// Row-major, BLAS-style: C[M,N] = A[M,K] x B[K,N]
 // Each thread computes one C element; tiles are TILE_SIZE x TILE_SIZE.
 // Uses cp.async to overlap global->shared copies for tile t+1 while computing tile t.
 __global__ void gemm_shared_cp_async(const float* __restrict__ A,
                                      const float* __restrict__ B,
                                      float* __restrict__ C,
-                                     int n, int m, int k) {
+                                     int m, int n, int k) {
 #if __CUDA_ARCH__ >= 800
     // Use +8 padding so each row stride is 160B for TILE_SIZE=32,
     // which preserves 16B alignment for cp.async. Also mitigates bank conflicts.
@@ -20,8 +20,8 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int n_addr = blockIdx.x * TILE_SIZE + ty; // row in C/A
-    const int k_addr = blockIdx.y * TILE_SIZE + tx; // col in C/B
+    const int m_row = blockIdx.x * TILE_SIZE + ty; // row in C/A (M)
+    const int n_col = blockIdx.y * TILE_SIZE + tx; // col in C/B (N)
 
     float acc = 0.f;
 
@@ -54,16 +54,16 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
 
     // Prime tile 0 into buffer 0
     {
-        const int a_col0 = 0 + tx;
-        const int b_row0 = 0 + ty;
+        const int a_col0 = 0 + tx;  // along K
+        const int b_row0 = 0 + ty;  // along K
         uint32_t sA = __cvta_generic_to_shared(&As[buf][ty][tx]);
         uint32_t sB = __cvta_generic_to_shared(&Bs[buf][ty][tx]);
         if ((tx & 3) == 0) {
             // Try 16B vectorized copy when aligned and fully in-bounds
-            const bool canA16 = ((m & 3) == 0) && (n_addr < n) && (a_col0 + 3 < m);
-            const bool canB16 = ((k & 3) == 0) && (b_row0 < m) && (k_addr + 3 < k);
-            const float* gA = A + static_cast<size_t>(n_addr) * m + a_col0;
-            const float* gB = B + static_cast<size_t>(b_row0) * k + k_addr;
+            const bool canA16 = ((k & 3) == 0) && (m_row < m) && (a_col0 + 3 < k);
+            const bool canB16 = ((n & 3) == 0) && (b_row0 < k) && (n_col + 3 < n);
+            const float* gA = A + static_cast<size_t>(m_row) * k + a_col0;
+            const float* gB = B + static_cast<size_t>(b_row0) * n + n_col;
             cp_async_f16(sA, gA, canA16);
             cp_async_f16(sB, gB, canB16);
             if (!canA16) {
@@ -71,16 +71,16 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
                 #pragma unroll
                 for (int jj = 0; jj < 4; ++jj) {
                     const int acol = a_col0 + jj;
-                    cp_async_f32(sA + jj * 4, A + static_cast<size_t>(n_addr) * m + acol,
-                                 (n_addr < n) && (acol < m));
+                    cp_async_f32(sA + jj * 4, A + static_cast<size_t>(m_row) * k + acol,
+                                 (m_row < m) && (acol < k));
                 }
             }
             if (!canB16) {
                 #pragma unroll
                 for (int jj = 0; jj < 4; ++jj) {
-                    const int kcol = k_addr + jj;
-                    cp_async_f32(sB + jj * 4, B + static_cast<size_t>(b_row0) * k + kcol,
-                                 (b_row0 < m) && (kcol < k));
+                    const int ncol = n_col + jj;
+                    cp_async_f32(sB + jj * 4, B + static_cast<size_t>(b_row0) * n + ncol,
+                                 (b_row0 < k) && (ncol < n));
                 }
             }
         }
@@ -90,38 +90,38 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
     }
 
     // Main loop over tiles with pipelined copies and compute
-    for (int i = 0; i < m; i += TILE_SIZE) {
+    for (int k0 = 0; k0 < k; k0 += TILE_SIZE) {
         const int next = buf ^ 1;
-        const int inext = i + TILE_SIZE;
+        const int inext = k0 + TILE_SIZE;
 
         // Issue async copies for next tile (if any), overlapping with compute below
-        if (inext < m) {
-            const int a_col = inext + tx;
-            const int b_row = inext + ty;
+        if (inext < k) {
+            const int a_col = inext + tx; // along K
+            const int b_row = inext + ty; // along K
 
             uint32_t sA2 = __cvta_generic_to_shared(&As[next][ty][tx]);
             uint32_t sB2 = __cvta_generic_to_shared(&Bs[next][ty][tx]);
             if ((tx & 3) == 0) {
-                const bool canA16 = ((m & 3) == 0) && (n_addr < n) && (a_col + 3 < m);
-                const bool canB16 = ((k & 3) == 0) && (b_row < m) && (k_addr + 3 < k);
-                const float* gA = A + static_cast<size_t>(n_addr) * m + a_col;
-                const float* gB = B + static_cast<size_t>(b_row) * k + k_addr;
+                const bool canA16 = ((k & 3) == 0) && (m_row < m) && (a_col + 3 < k);
+                const bool canB16 = ((n & 3) == 0) && (b_row < k) && (n_col + 3 < n);
+                const float* gA = A + static_cast<size_t>(m_row) * k + a_col;
+                const float* gB = B + static_cast<size_t>(b_row) * n + n_col;
                 cp_async_f16(sA2, gA, canA16);
                 cp_async_f16(sB2, gB, canB16);
                 if (!canA16) {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
                         const int acol = a_col + jj;
-                        cp_async_f32(sA2 + jj * 4, A + static_cast<size_t>(n_addr) * m + acol,
-                                     (n_addr < n) && (acol < m));
+                        cp_async_f32(sA2 + jj * 4, A + static_cast<size_t>(m_row) * k + acol,
+                                     (m_row < m) && (acol < k));
                     }
                 }
                 if (!canB16) {
                     #pragma unroll
                     for (int jj = 0; jj < 4; ++jj) {
-                        const int kcol = k_addr + jj;
-                        cp_async_f32(sB2 + jj * 4, B + static_cast<size_t>(b_row) * k + kcol,
-                                     (b_row < m) && (kcol < k));
+                        const int ncol = n_col + jj;
+                        cp_async_f32(sB2 + jj * 4, B + static_cast<size_t>(b_row) * n + ncol,
+                                     (b_row < k) && (ncol < n));
                     }
                 }
             }
@@ -135,15 +135,15 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
         }
 
         // Before switching to next buffer, ensure the async copies completed
-        if (inext < m) {
+        if (inext < k) {
             asm volatile("cp.async.wait_group 0;\n" ::);
         }
         __syncthreads();
         buf ^= 1;
     }
 
-    if (n_addr < n && k_addr < k) {
-        C[static_cast<size_t>(n_addr) * k + k_addr] = acc;
+    if (m_row < m && n_col < n) {
+        C[static_cast<size_t>(m_row) * n + n_col] = acc;
     }
 #else
     // Fallback: simple shared-memory GEMM if compiled for < SM80
@@ -151,18 +151,17 @@ __global__ void gemm_shared_cp_async(const float* __restrict__ A,
     __shared__ float Bs[TILE_SIZE][TILE_SIZE + 1];
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int n_addr = blockIdx.x * TILE_SIZE + ty;
-    const int k_addr = blockIdx.y * TILE_SIZE + tx;
+    const int m_row = blockIdx.x * TILE_SIZE + ty;
+    const int n_col = blockIdx.y * TILE_SIZE + tx;
     float acc = 0.f;
-    for (int i = 0; i < m; i += TILE_SIZE) {
-        As[ty][tx] = (n_addr < n && (i + tx) < m) ? A[static_cast<size_t>(n_addr) * m + (i + tx)] : 0.f;
-        Bs[ty][tx] = (k_addr < k && (i + ty) < m) ? B[static_cast<size_t>(i + ty) * k + k_addr] : 0.f;
+    for (int k0 = 0; k0 < k; k0 += TILE_SIZE) {
+        As[ty][tx] = (m_row < m && (k0 + tx) < k) ? A[static_cast<size_t>(m_row) * k + (k0 + tx)] : 0.f;
+        Bs[ty][tx] = (n_col < n && (k0 + ty) < k) ? B[static_cast<size_t>(k0 + ty) * n + n_col] : 0.f;
         __syncthreads();
         #pragma unroll
         for (int j = 0; j < TILE_SIZE; ++j) acc += As[ty][j] * Bs[j][tx];
         __syncthreads();
     }
-    if (n_addr < n && k_addr < k) C[static_cast<size_t>(n_addr) * k + k_addr] = acc;
+    if (m_row < m && n_col < n) C[static_cast<size_t>(m_row) * n + n_col] = acc;
 #endif
 }
-

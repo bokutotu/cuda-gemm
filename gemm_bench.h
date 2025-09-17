@@ -15,9 +15,11 @@
 #include "gemm_shared_pingpong.cuh"
 #include "gemm_shared_cp_async.cuh"
 #include "gemm_shared_register_tile.cuh"
+#include "gemm_shared_square_tile.cuh"
 #include "gemm_cublas.h"
 
-struct GemmDims { int N{1000}, M{1000}, K{1000}; };
+// BLAS-style dimensions
+struct GemmDims { int M{1000}, N{1000}, K{1000}; };
 
 struct VariantResult {
     const char* name;
@@ -35,9 +37,9 @@ struct GemmBenchData {
 
 inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool do_cpu = true) {
     // --- Sizes ---
-    const size_t sizeA = static_cast<size_t>(d.N) * d.M;
-    const size_t sizeB = static_cast<size_t>(d.M) * d.K;
-    const size_t sizeC = static_cast<size_t>(d.N) * d.K;
+    const size_t sizeA = static_cast<size_t>(d.M) * d.K; // A[M,K]
+    const size_t sizeB = static_cast<size_t>(d.K) * d.N; // B[K,N]
+    const size_t sizeC = static_cast<size_t>(d.M) * d.N; // C[M,N]
 
     // --- Host inputs ---
     std::vector<float> A(sizeA), B(sizeB);
@@ -60,10 +62,10 @@ inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool d
     // --- Common launch geometry ---
     const int TS = TILE_SIZE;
     const dim3 block_naive(16, 16);
-    const dim3 grid_naive((d.K + block_naive.x - 1) / block_naive.x,
-                          (d.N + block_naive.y - 1) / block_naive.y);
+    const dim3 grid_naive((d.N + block_naive.x - 1) / block_naive.x,
+                          (d.M + block_naive.y - 1) / block_naive.y);
     const dim3 block_shared(TS, TS);
-    const dim3 grid_shared((d.N + TS - 1) / TS, (d.K + TS - 1) / TS);
+    const dim3 grid_shared((d.M + TS - 1) / TS, (d.N + TS - 1) / TS);
     // Register tile launch geometry (per-thread micro tile REG_TILE_M x REG_TILE_N)
     const dim3 block_reg(TS / REG_TILE_N, TS / REG_TILE_M);
     const dim3 grid_reg = grid_shared;
@@ -74,9 +76,9 @@ inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool d
 
     // --- Build golden reference ---
     if (do_cpu) {
-        out.cpu_ms = benchmark_host_ms([&]{ matmul(A.data(), B.data(), out.ref.data(), d.N, d.M, d.K); });
+        out.cpu_ms = benchmark_host_ms([&]{ matmul(A.data(), B.data(), out.ref.data(), d.M, d.N, d.K); });
     } else {
-        gemm_cublas(handle, dA, dB, dC, d.N, d.M, d.K);
+        gemm_cublas(handle, dA, dB, dC, d.M, d.N, d.K);
         checkCuda(cudaMemcpy(out.ref.data(), dC, sizeC * sizeof(float), cudaMemcpyDeviceToHost), "golden D2H");
     }
 
@@ -87,44 +89,68 @@ inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool d
     };
 
     std::vector<Task> tasks;
-    tasks.reserve(11);
+    tasks.reserve(16);
 
     tasks.push_back(Task{ "gemm_naive", [=]() {
-        gemm_naive<<<grid_naive, block_naive>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_naive<<<grid_naive, block_naive>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared", [=]() {
-        gemm_shared<<<grid_shared, block_shared>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared<<<grid_shared, block_shared>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+    tasks.push_back(Task{ "gemm_shared_square_tile_16x16x32", [=]() {
+        constexpr int BM = 16;
+        constexpr int BN = 16;
+        constexpr int BK = 32;
+        const dim3 block(BN, BM);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square<BM, BN, BK><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+    tasks.push_back(Task{ "gemm_shared_square_tile_32x32x32", [=]() {
+        constexpr int BM = 32;
+        constexpr int BN = 32;
+        constexpr int BK = 32;
+        const dim3 block(BN, BM);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square<BM, BN, BK><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+    tasks.push_back(Task{ "gemm_shared_square_tile_32x32x64", [=]() {
+        constexpr int BM = 32;
+        constexpr int BN = 32;
+        constexpr int BK = 64;
+        const dim3 block(BN, BM);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square<BM, BN, BK><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_float4", [=]() {
-        gemm_shared_float4<<<grid_shared, block_shared>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_float4<<<grid_shared, block_shared>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_pingpong", [=]() {
-        gemm_shared_pingpong<<<grid_shared, block_shared>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_pingpong<<<grid_shared, block_shared>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_pingpong_float4", [=]() {
-        gemm_shared_pingpong_float4<<<grid_shared, block_shared>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_pingpong_float4<<<grid_shared, block_shared>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_cp_async", [=]() {
-        gemm_shared_cp_async<<<grid_shared, block_shared>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_cp_async<<<grid_shared, block_shared>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_cp_async_register_tile", [=]() {
-        gemm_shared_cp_async_register_tile<<<grid_reg, block_reg>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_cp_async_register_tile<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "cublasSgemm (gemm_cublas)", [=]() {
-        gemm_cublas(handle, dA, dB, dC, d.N, d.M, d.K);
+        gemm_cublas(handle, dA, dB, dC, d.M, d.N, d.K);
     }});
     // Register-tile variants
     tasks.push_back(Task{ "gemm_shared_register_tile", [=]() {
-        gemm_shared_register_tile<<<grid_reg, block_reg>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_register_tile<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_register_tile_float4", [=]() {
-        gemm_shared_register_tile_float4<<<grid_reg, block_reg>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_register_tile_float4<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_register_tile_pingpong", [=]() {
-        gemm_shared_register_tile_pingpong<<<grid_reg, block_reg>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_register_tile_pingpong<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
     tasks.push_back(Task{ "gemm_shared_register_tile_pingpong_float4", [=]() {
-        gemm_shared_register_tile_pingpong_float4<<<grid_reg, block_reg>>>(dA, dB, dC, d.N, d.M, d.K);
+        gemm_shared_register_tile_pingpong_float4<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
 
     // --- Execute, time, and validate each variant against golden ---
@@ -147,7 +173,7 @@ inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool d
 inline void print_results(const GemmBenchData& data, std::ostream& os = std::cout) {
     const auto& d = data.d;
     os << "=== GEMM Benchmark ===\n";
-    os << "Dims: N=" << d.N << " M=" << d.M << " K=" << d.K << "\n";
+    os << "Dims: M=" << d.M << " N=" << d.N << " K=" << d.K << "\n";
     if (data.cpu_ms > 0.0) {
         os << "Reference: CPU (avg)     : " << std::fixed << std::setprecision(3) << data.cpu_ms << " ms\n";
     } else {
@@ -172,7 +198,7 @@ inline void print_results(const GemmBenchData& data, std::ostream& os = std::cou
     const int total_w = 2 + w_name + 2 + w_time + 2 + w_gflops + 2 + w_mis + 2 + w_err;
     os << "  " << std::string(total_w - 2, '-') << '\n';
 
-    const double ops = 2.0 * static_cast<double>(d.N) * d.M * d.K; // FMA counted as 2 ops
+    const double ops = 2.0 * static_cast<double>(d.M) * d.N * d.K; // FMA counted as 2 ops
     for (const auto& r : data.results) {
         const double gflops = (r.time_ms > 0.0) ? (ops / 1.0e9) / (r.time_ms / 1.0e3) : 0.0;
         os << "  " << std::left  << std::setw(w_name) << r.name

@@ -1,26 +1,26 @@
-// Naive matrix multiplication (row-major)
-// Computes: C[n,k] = A[n,m] x B[m,k]
+// Naive matrix multiplication (row-major, BLAS-style)
+// Computes: C[M,N] = A[M,K] x B[K,N]
 // Shapes (row-major):
-//  - A: n x m
-//  - B: m x k
-//  - C: n x k
+//  - A: M x K
+//  - B: K x N
+//  - C: M x N
 #pragma once
 
 __global__ void gemm_naive(const float* __restrict__ A,
                            const float* __restrict__ B,
                            float* __restrict__ C,
-                           int n, int m, int k) {
-    const int col = blockIdx.x * blockDim.x + threadIdx.x; // k-dimension (columns)
-    const int row = blockIdx.y * blockDim.y + threadIdx.y; // n-dimension (rows)
+                           int m, int n, int k) {
+    const int col = blockIdx.x * blockDim.x + threadIdx.x; // N-dimension (columns)
+    const int row = blockIdx.y * blockDim.y + threadIdx.y; // M-dimension (rows)
 
-    if (row >= n || col >= k) return;
+    if (row >= m || col >= n) return;
 
     float acc = 0.0f;
-    for (int p = 0; p < m; ++p) {
-        const float a = A[row * m + p];   // A[row, p]
-        const float b = B[p * k + col];   // B[p, col]
+    for (int p = 0; p < k; ++p) {
+        const float a = A[row * k + p];   // A[row, p]
+        const float b = B[p * n + col];   // B[p, col]
         acc += a * b;
     }
 
-    C[row * k + col] = acc;
+    C[row * n + col] = acc;
 }

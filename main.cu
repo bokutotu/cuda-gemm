@@ -5,9 +5,9 @@
 #include "gemm_bench.h"
 
 static void usage(const char* prog){
-    std::cout << "Usage: " << prog << " [N [M K]] [--no-cpu]\n"
-              << "  - if only N given, uses N=N, M=N, K=N\n"
-              << "  - default N=M=K=1000\n"
+    std::cout << "Usage: " << prog << " [M [N K]] [--no-cpu]\n"
+              << "  - if only M given, uses M=N=K=M\n"
+              << "  - default M=N=K=1000\n"
               << "  - --no-cpu : skip CPU reference (recommended for large sizes)\n";
 }
 
@@ -28,13 +28,13 @@ int main(int argc, char** argv) {
         }
     }
     if (args.size() == 1) {
-        int n = std::atoi(args[0]);
-        if (n > 0) dims = GemmDims{n, n, n};
+        int s = std::atoi(args[0]);
+        if (s > 0) dims = GemmDims{s, s, s};
     } else if (args.size() == 3) {
-        int N = std::atoi(args[0]);
-        int M = std::atoi(args[1]);
+        int M = std::atoi(args[0]);
+        int N = std::atoi(args[1]);
         int K = std::atoi(args[2]);
-        if (N>0 && M>0 && K>0) dims = GemmDims{N, M, K};
+        if (M>0 && N>0 && K>0) dims = GemmDims{M, N, K};
     } else if (!args.empty()) {
         usage(argv[0]);
         return 1;

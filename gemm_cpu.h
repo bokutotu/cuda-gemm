@@ -1,13 +1,15 @@
 #pragma once
 
-inline void matmul(const float* A, const float* B, float* C, int n, int m, int k) {
-    for (int i = 0; i < n; ++i) {
-        for (int l = 0; l < k; ++l) {
+// Row-major CPU GEMM in BLAS-style shapes
+// C(M,N) = A(M,K) * B(K,N)
+inline void matmul(const float* A, const float* B, float* C, int m, int n, int k) {
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < n; ++j) {
             float sum = 0.0f;
-            for (int j = 0; j < m; ++j) {
-                sum += A[i*m + j] * B[j*k + l];
+            for (int p = 0; p < k; ++p) {
+                sum += A[i * k + p] * B[p * n + j];
             }
-            C[i*k + l] = sum;
+            C[i * n + j] = sum;
         }
     }
 }

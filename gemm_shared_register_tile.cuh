@@ -15,19 +15,20 @@
 static_assert(TILE_SIZE % REG_TILE_M == 0, "TILE_SIZE must be divisible by REG_TILE_M");
 static_assert(TILE_SIZE % REG_TILE_N == 0, "TILE_SIZE must be divisible by REG_TILE_N");
 
-// Launch geometry (recommended):
+// Launch geometry (recommended, row-major C[M,N]):
 //   dim3 block(TILE_SIZE/REG_TILE_N, TILE_SIZE/REG_TILE_M);
-//   dim3 grid((n + TILE_SIZE - 1) / TILE_SIZE,
-//             (k + TILE_SIZE - 1) / TILE_SIZE);
+//   dim3 grid((m + TILE_SIZE - 1) / TILE_SIZE,
+//             (n + TILE_SIZE - 1) / TILE_SIZE);
 // Each thread computes a REG_TILE_M x REG_TILE_N micro-tile entirely in registers.
 
 // ---------------------------------------------
 // Shared (scalar global loads) + register tile
 // ---------------------------------------------
+// Row-major, BLAS-style: C[M,N] = A[M,K] x B[K,N]
 __global__ void gemm_shared_register_tile(const float* __restrict__ A,
                                           const float* __restrict__ B,
                                           float* __restrict__ C,
-                                          int n, int m, int k) {
+                                          int m, int n, int k) {
     __shared__ float As[TILE_SIZE][TILE_SIZE + 1];
     __shared__ float Bs[TILE_SIZE][TILE_SIZE + 1];
 
@@ -47,7 +48,7 @@ __global__ void gemm_shared_register_tile(const float* __restrict__ A,
         for (int j = 0; j < REG_TILE_N; ++j) acc[i][j] = 0.f;
     }
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         // Load A and B tiles to shared. Each thread loads REG_TILE_M x REG_TILE_N elements.
         #pragma unroll
         for (int ii = 0; ii < REG_TILE_M; ++ii) {
@@ -60,14 +61,14 @@ __global__ void gemm_shared_register_tile(const float* __restrict__ A,
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int a_col = tx * REG_TILE_N + jj;      // 0..TILE_SIZE-1
                 const int ga_col = t + a_col;                // global A col
-                As[a_row][a_col] = (ga_row < n && ga_col < m)
-                                    ? A[static_cast<size_t>(ga_row) * m + ga_col]
+                As[a_row][a_col] = (ga_row < m && ga_col < k)
+                                    ? A[static_cast<size_t>(ga_row) * k + ga_col]
                                     : 0.f;
 
                 const int b_col = tx * REG_TILE_N + jj;      // 0..TILE_SIZE-1
                 const int gb_col = tile_col0 + b_col;        // global B col
-                Bs[b_row][b_col] = (gb_row < m && gb_col < k)
-                                    ? B[static_cast<size_t>(gb_row) * k + gb_col]
+                Bs[b_row][b_col] = (gb_row < k && gb_col < n)
+                                    ? B[static_cast<size_t>(gb_row) * n + gb_col]
                                     : 0.f;
             }
         }
@@ -103,11 +104,11 @@ __global__ void gemm_shared_register_tile(const float* __restrict__ A,
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
@@ -122,7 +123,7 @@ __global__ void gemm_shared_register_tile(const float* __restrict__ A,
 __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
                                                    const float* __restrict__ B,
                                                    float* __restrict__ C,
-                                                   int n, int m, int k) {
+                                                   int m, int n, int k) {
 #if __CUDA_ARCH__ >= 800
     __shared__ float As[2][TILE_SIZE][TILE_SIZE + 8];
     __shared__ float Bs[2][TILE_SIZE][TILE_SIZE + 8];
@@ -181,21 +182,21 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
                 for (int v = 0; v < REG_TILE_N; v += 4) {
                     uint32_t sA = __cvta_generic_to_shared(&As[buf][a_row][a_col0 + v]);
                     uint32_t sB = __cvta_generic_to_shared(&Bs[buf][b_row][b_col0 + v]);
-                    const bool canA16 = ((m & 3) == 0) && (ga_row < n) && ((tbase + a_col0 + v + 3) < m);
-                    const bool canB16 = ((k & 3) == 0) && (gb_row < m) && ((tile_col0 + b_col0 + v + 3) < k);
-                    const float* gA = A + static_cast<size_t>(ga_row) * m + (tbase + a_col0 + v);
-                    const float* gB = B + static_cast<size_t>(gb_row) * k + (tile_col0 + b_col0 + v);
+                    const bool canA16 = ((k & 3) == 0) && (ga_row < m) && ((tbase + a_col0 + v + 3) < k);
+                    const bool canB16 = ((n & 3) == 0) && (gb_row < k) && ((tile_col0 + b_col0 + v + 3) < n);
+                    const float* gA = A + static_cast<size_t>(ga_row) * k + (tbase + a_col0 + v);
+                    const float* gB = B + static_cast<size_t>(gb_row) * n + (tile_col0 + b_col0 + v);
                     cp_async_f16(sA, gA, canA16);
                     cp_async_f16(sB, gB, canB16);
                     if (!canA16) {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj)
-                            cp_async_f32(sA + jj * 4, gA + jj, (ga_row < n) && ((tbase + a_col0 + v + jj) < m));
+                            cp_async_f32(sA + jj * 4, gA + jj, (ga_row < m) && ((tbase + a_col0 + v + jj) < k));
                     }
                     if (!canB16) {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj)
-                            cp_async_f32(sB + jj * 4, gB + jj, (gb_row < m) && ((tile_col0 + b_col0 + v + jj) < k));
+                            cp_async_f32(sB + jj * 4, gB + jj, (gb_row < k) && ((tile_col0 + b_col0 + v + jj) < n));
                     }
                 }
             } else {
@@ -203,12 +204,12 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int ga_col = tbase + a_col0 + jj;
                     uint32_t sA = __cvta_generic_to_shared(&As[buf][a_row][a_col0 + jj]);
-                    const float* gA = A + static_cast<size_t>(ga_row) * m + ga_col;
-                    cp_async_f32(sA, gA, (ga_row < n) && (ga_col < m));
+                    const float* gA = A + static_cast<size_t>(ga_row) * k + ga_col;
+                    cp_async_f32(sA, gA, (ga_row < m) && (ga_col < k));
                     const int gb_col = tile_col0 + b_col0 + jj;
                     uint32_t sB = __cvta_generic_to_shared(&Bs[buf][b_row][b_col0 + jj]);
-                    const float* gB = B + static_cast<size_t>(gb_row) * k + gb_col;
-                    cp_async_f32(sB, gB, (gb_row < m) && (gb_col < k));
+                    const float* gB = B + static_cast<size_t>(gb_row) * n + gb_col;
+                    cp_async_f32(sB, gB, (gb_row < k) && (gb_col < n));
                 }
             }
         }
@@ -217,12 +218,12 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
         __syncthreads();
     }
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         const int next = buf ^ 1;
         const int inext = t + TILE_SIZE;
 
         // Preload next tile while computing current
-        if (inext < m) {
+        if (inext < k) {
             #pragma unroll
             for (int ii = 0; ii < REG_TILE_M; ++ii) {
                 const int a_row = ty * REG_TILE_M + ii;
@@ -237,21 +238,21 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
                     for (int v = 0; v < REG_TILE_N; v += 4) {
                         uint32_t sA = __cvta_generic_to_shared(&As[next][a_row][a_col0 + v]);
                         uint32_t sB = __cvta_generic_to_shared(&Bs[next][b_row][b_col0 + v]);
-                        const bool canA16 = ((m & 3) == 0) && (ga_row < n) && ((inext + a_col0 + v + 3) < m);
-                        const bool canB16 = ((k & 3) == 0) && (gb_row < m) && ((tile_col0 + b_col0 + v + 3) < k);
-                        const float* gA = A + static_cast<size_t>(ga_row) * m + (inext + a_col0 + v);
-                        const float* gB = B + static_cast<size_t>(gb_row) * k + (tile_col0 + b_col0 + v);
+                        const bool canA16 = ((k & 3) == 0) && (ga_row < m) && ((inext + a_col0 + v + 3) < k);
+                        const bool canB16 = ((n & 3) == 0) && (gb_row < k) && ((tile_col0 + b_col0 + v + 3) < n);
+                        const float* gA = A + static_cast<size_t>(ga_row) * k + (inext + a_col0 + v);
+                        const float* gB = B + static_cast<size_t>(gb_row) * n + (tile_col0 + b_col0 + v);
                         cp_async_f16(sA, gA, canA16);
                         cp_async_f16(sB, gB, canB16);
                         if (!canA16) {
                             #pragma unroll
                             for (int jj = 0; jj < 4; ++jj)
-                                cp_async_f32(sA + jj * 4, gA + jj, (ga_row < n) && ((inext + a_col0 + v + jj) < m));
+                                cp_async_f32(sA + jj * 4, gA + jj, (ga_row < m) && ((inext + a_col0 + v + jj) < k));
                         }
                         if (!canB16) {
                             #pragma unroll
                             for (int jj = 0; jj < 4; ++jj)
-                                cp_async_f32(sB + jj * 4, gB + jj, (gb_row < m) && ((tile_col0 + b_col0 + v + jj) < k));
+                                cp_async_f32(sB + jj * 4, gB + jj, (gb_row < k) && ((tile_col0 + b_col0 + v + jj) < n));
                         }
                     }
                 } else {
@@ -259,12 +260,12 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
                     for (int jj = 0; jj < REG_TILE_N; ++jj) {
                         const int ga_col = inext + a_col0 + jj;
                         uint32_t sA = __cvta_generic_to_shared(&As[next][a_row][a_col0 + jj]);
-                        const float* gA = A + static_cast<size_t>(ga_row) * m + ga_col;
-                        cp_async_f32(sA, gA, (ga_row < n) && (ga_col < m));
+                        const float* gA = A + static_cast<size_t>(ga_row) * k + ga_col;
+                        cp_async_f32(sA, gA, (ga_row < m) && (ga_col < k));
                         const int gb_col = tile_col0 + b_col0 + jj;
                         uint32_t sB = __cvta_generic_to_shared(&Bs[next][b_row][b_col0 + jj]);
-                        const float* gB = B + static_cast<size_t>(gb_row) * k + gb_col;
-                        cp_async_f32(sB, gB, (gb_row < m) && (gb_col < k));
+                        const float* gB = B + static_cast<size_t>(gb_row) * n + gb_col;
+                        cp_async_f32(sB, gB, (gb_row < k) && (gb_col < n));
                     }
                 }
             }
@@ -287,7 +288,7 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
             }
         }
 
-        if (inext < m) {
+        if (inext < k) {
             asm volatile("cp.async.wait_group 0;\n" ::);
         }
         __syncthreads();
@@ -298,11 +299,11 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
@@ -325,7 +326,7 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
         for (int j = 0; j < REG_TILE_N; ++j) acc[i][j] = 0.f;
     }
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         #pragma unroll
         for (int ii = 0; ii < REG_TILE_M; ++ii) {
             const int a_row = ty * REG_TILE_M + ii;
@@ -336,10 +337,10 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int a_col = tx * REG_TILE_N + jj;
                 const int ga_col = t + a_col;
-                As[a_row][a_col] = (ga_row < n && ga_col < m) ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                As[a_row][a_col] = (ga_row < m && ga_col < k) ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                 const int b_col = tx * REG_TILE_N + jj;
                 const int gb_col = tile_col0 + b_col;
-                Bs[b_row][b_col] = (gb_row < m && gb_col < k) ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                Bs[b_row][b_col] = (gb_row < k && gb_col < n) ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
             }
         }
         __syncthreads();
@@ -362,11 +363,11 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
@@ -379,7 +380,7 @@ __global__ void gemm_shared_cp_async_register_tile(const float* __restrict__ A,
 __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
                                                  const float* __restrict__ B,
                                                  float* __restrict__ C,
-                                                 int n, int m, int k) {
+                                                 int m, int n, int k) {
     __shared__ float As[TILE_SIZE][TILE_SIZE + 8];
     __shared__ float Bs[TILE_SIZE][TILE_SIZE + 8];
 
@@ -397,7 +398,7 @@ __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
         for (int j = 0; j < REG_TILE_N; ++j) acc[i][j] = 0.f;
     }
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         // Load tile for A and B; vectorize along N-dim (columns) where possible.
         #pragma unroll
         for (int ii = 0; ii < REG_TILE_M; ++ii) {
@@ -412,28 +413,28 @@ __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
             if ((REG_TILE_N % 4) == 0) {
                 #pragma unroll
                 for (int v = 0; v < REG_TILE_N; v += 4) {
-                    const bool canA16 = ((m & 3) == 0) && (ga_row < n) && ((t + a_col0 + v + 3) < m);
-                    const bool canB16 = ((k & 3) == 0) && (gb_row < m) && ((tile_col0 + b_col0 + v + 3) < k);
+                    const bool canA16 = ((k & 3) == 0) && (ga_row < m) && ((t + a_col0 + v + 3) < k);
+                    const bool canB16 = ((n & 3) == 0) && (gb_row < k) && ((tile_col0 + b_col0 + v + 3) < n);
                     if (canA16) {
-                        const float4 va = *reinterpret_cast<const float4*>(&A[static_cast<size_t>(ga_row) * m + (t + a_col0 + v)]);
+                        const float4 va = *reinterpret_cast<const float4*>(&A[static_cast<size_t>(ga_row) * k + (t + a_col0 + v)]);
                         *reinterpret_cast<float4*>(&As[a_row][a_col0 + v]) = va;
                     } else {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj) {
                             const int ga_col = t + a_col0 + v + jj;
-                            As[a_row][a_col0 + v + jj] = (ga_row < n && ga_col < m)
-                                ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                            As[a_row][a_col0 + v + jj] = (ga_row < m && ga_col < k)
+                                ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                         }
                     }
                     if (canB16) {
-                        const float4 vb = *reinterpret_cast<const float4*>(&B[static_cast<size_t>(gb_row) * k + (tile_col0 + b_col0 + v)]);
+                        const float4 vb = *reinterpret_cast<const float4*>(&B[static_cast<size_t>(gb_row) * n + (tile_col0 + b_col0 + v)]);
                         *reinterpret_cast<float4*>(&Bs[b_row][b_col0 + v]) = vb;
                     } else {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj) {
                             const int gb_col = tile_col0 + b_col0 + v + jj;
-                            Bs[b_row][b_col0 + v + jj] = (gb_row < m && gb_col < k)
-                                ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                            Bs[b_row][b_col0 + v + jj] = (gb_row < k && gb_col < n)
+                                ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
                         }
                     }
                 }
@@ -441,14 +442,14 @@ __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
                 #pragma unroll
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int ga_col = t + a_col0 + jj;
-                    As[a_row][a_col0 + jj] = (ga_row < n && ga_col < m)
-                        ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                    As[a_row][a_col0 + jj] = (ga_row < m && ga_col < k)
+                        ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                 }
                 #pragma unroll
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int gb_col = tile_col0 + b_col0 + jj;
-                    Bs[b_row][b_col0 + jj] = (gb_row < m && gb_col < k)
-                        ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                    Bs[b_row][b_col0 + jj] = (gb_row < k && gb_col < n)
+                        ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
                 }
             }
         }
@@ -476,11 +477,11 @@ __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
@@ -492,7 +493,7 @@ __global__ void gemm_shared_register_tile_float4(const float* __restrict__ A,
 __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
                                                    const float* __restrict__ B,
                                                    float* __restrict__ C,
-                                                   int n, int m, int k) {
+                                                   int m, int n, int k) {
     __shared__ float As[2][TILE_SIZE][TILE_SIZE + 1];
     __shared__ float Bs[2][TILE_SIZE][TILE_SIZE + 1];
 
@@ -525,18 +526,18 @@ __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int a_col = tx * REG_TILE_N + jj;
                 const int ga_col = t + a_col;
-                As[buf][a_row][a_col] = (ga_row < n && ga_col < m)
-                    ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                As[buf][a_row][a_col] = (ga_row < m && ga_col < k)
+                    ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                 const int b_col = tx * REG_TILE_N + jj;
                 const int gb_col = tile_col0 + b_col;
-                Bs[buf][b_row][b_col] = (gb_row < m && gb_col < k)
-                    ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                Bs[buf][b_row][b_col] = (gb_row < k && gb_col < n)
+                    ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
             }
         }
         __syncthreads();
     }
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         // Compute on current buffer
         #pragma unroll
         for (int p = 0; p < TILE_SIZE; ++p) {
@@ -557,7 +558,7 @@ __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
 
         const int next = buf ^ 1;
         const int tn = t + TILE_SIZE;
-        if (tn < m) {
+        if (tn < k) {
             // Preload next tile into the other buffer
             #pragma unroll
             for (int ii = 0; ii < REG_TILE_M; ++ii) {
@@ -569,12 +570,12 @@ __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int a_col = tx * REG_TILE_N + jj;
                     const int ga_col = tn + a_col;
-                    As[next][a_row][a_col] = (ga_row < n && ga_col < m)
-                        ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                    As[next][a_row][a_col] = (ga_row < m && ga_col < k)
+                        ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                     const int b_col = tx * REG_TILE_N + jj;
                     const int gb_col = tile_col0 + b_col;
-                    Bs[next][b_row][b_col] = (gb_row < m && gb_col < k)
-                        ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                    Bs[next][b_row][b_col] = (gb_row < k && gb_col < n)
+                        ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
                 }
             }
         }
@@ -586,11 +587,11 @@ __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
@@ -602,7 +603,7 @@ __global__ void gemm_shared_register_tile_pingpong(const float* __restrict__ A,
 __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restrict__ A,
                                                           const float* __restrict__ B,
                                                           float* __restrict__ C,
-                                                          int n, int m, int k) {
+                                                          int m, int n, int k) {
     __shared__ float As[2][TILE_SIZE][TILE_SIZE + 8];
     __shared__ float Bs[2][TILE_SIZE][TILE_SIZE + 8];
 
@@ -635,28 +636,28 @@ __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restric
             if ((REG_TILE_N % 4) == 0) {
                 #pragma unroll
                 for (int v = 0; v < REG_TILE_N; v += 4) {
-                    const bool canA16 = ((m & 3) == 0) && (ga_row < n) && ((t_base + a_col0 + v + 3) < m);
-                    const bool canB16 = ((k & 3) == 0) && (gb_row < m) && ((tile_col0 + b_col0 + v + 3) < k);
+                    const bool canA16 = ((k & 3) == 0) && (ga_row < m) && ((t_base + a_col0 + v + 3) < k);
+                    const bool canB16 = ((n & 3) == 0) && (gb_row < k) && ((tile_col0 + b_col0 + v + 3) < n);
                     if (canA16) {
-                        const float4 va = *reinterpret_cast<const float4*>(&A[static_cast<size_t>(ga_row) * m + (t_base + a_col0 + v)]);
+                        const float4 va = *reinterpret_cast<const float4*>(&A[static_cast<size_t>(ga_row) * k + (t_base + a_col0 + v)]);
                         *reinterpret_cast<float4*>(&As[which][a_row][a_col0 + v]) = va;
                     } else {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj) {
                             const int ga_col = t_base + a_col0 + v + jj;
-                            As[which][a_row][a_col0 + v + jj] = (ga_row < n && ga_col < m)
-                                ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                            As[which][a_row][a_col0 + v + jj] = (ga_row < m && ga_col < k)
+                                ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                         }
                     }
                     if (canB16) {
-                        const float4 vb = *reinterpret_cast<const float4*>(&B[static_cast<size_t>(gb_row) * k + (tile_col0 + b_col0 + v)]);
+                        const float4 vb = *reinterpret_cast<const float4*>(&B[static_cast<size_t>(gb_row) * n + (tile_col0 + b_col0 + v)]);
                         *reinterpret_cast<float4*>(&Bs[which][b_row][b_col0 + v]) = vb;
                     } else {
                         #pragma unroll
                         for (int jj = 0; jj < 4; ++jj) {
                             const int gb_col = tile_col0 + b_col0 + v + jj;
-                            Bs[which][b_row][b_col0 + v + jj] = (gb_row < m && gb_col < k)
-                                ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                            Bs[which][b_row][b_col0 + v + jj] = (gb_row < k && gb_col < n)
+                                ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
                         }
                     }
                 }
@@ -664,14 +665,14 @@ __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restric
                 #pragma unroll
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int ga_col = t_base + a_col0 + jj;
-                    As[which][a_row][a_col0 + jj] = (ga_row < n && ga_col < m)
-                        ? A[static_cast<size_t>(ga_row) * m + ga_col] : 0.f;
+                    As[which][a_row][a_col0 + jj] = (ga_row < m && ga_col < k)
+                        ? A[static_cast<size_t>(ga_row) * k + ga_col] : 0.f;
                 }
                 #pragma unroll
                 for (int jj = 0; jj < REG_TILE_N; ++jj) {
                     const int gb_col = tile_col0 + b_col0 + jj;
-                    Bs[which][b_row][b_col0 + jj] = (gb_row < m && gb_col < k)
-                        ? B[static_cast<size_t>(gb_row) * k + gb_col] : 0.f;
+                    Bs[which][b_row][b_col0 + jj] = (gb_row < k && gb_col < n)
+                        ? B[static_cast<size_t>(gb_row) * n + gb_col] : 0.f;
                 }
             }
         }
@@ -681,7 +682,7 @@ __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restric
     load_tile_float4(/*which=*/buf, /*t_base=*/0);
     __syncthreads();
 
-    for (int t = 0; t < m; t += TILE_SIZE) {
+    for (int t = 0; t < k; t += TILE_SIZE) {
         // Compute on current buffer
         #pragma unroll
         for (int p = 0; p < TILE_SIZE; ++p) {
@@ -702,7 +703,7 @@ __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restric
 
         const int next = buf ^ 1;
         const int tn = t + TILE_SIZE;
-        if (tn < m) load_tile_float4(/*which=*/next, /*t_base=*/tn);
+        if (tn < k) load_tile_float4(/*which=*/next, /*t_base=*/tn);
 
         __syncthreads();
         buf ^= 1;
@@ -711,11 +712,11 @@ __global__ void gemm_shared_register_tile_pingpong_float4(const float* __restric
     #pragma unroll
     for (int ii = 0; ii < REG_TILE_M; ++ii) {
         const int gr = out_row0 + ii;
-        if (gr < n) {
+        if (gr < m) {
             #pragma unroll
             for (int jj = 0; jj < REG_TILE_N; ++jj) {
                 const int gc = out_col0 + jj;
-                if (gc < k) C[static_cast<size_t>(gr) * k + gc] = acc[ii][jj];
+                if (gc < n) C[static_cast<size_t>(gr) * n + gc] = acc[ii][jj];
             }
         }
     }
