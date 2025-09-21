@@ -67,12 +67,19 @@ __global__ void gemm_shared_square_register_tile(const float* __restrict__ A,
         __syncthreads();
 
         #pragma unroll
-        for (int p = 0; p < BK; p++)
+        for (int p = 0; p < BK; ++p) {
+            float a_frag[RM];
+            float b_frag[RN];
             #pragma unroll
-            for (int pn = 0; pn < RN; pn++)
+            for (int pm = 0; pm < RM; ++pm) a_frag[pm] = As[tx * RM + pm][p];
+            #pragma unroll
+            for (int pn = 0; pn < RN; ++pn) b_frag[pn] = Bs[p][ty * RN + pn];
+            #pragma unroll
+            for (int pn = 0; pn < RN; ++pn)
                 #pragma unroll
-                for (int pm = 0; pm < RM; pm++)
-                    acc[pm][pn] += As[tx * RM + pm][p] * Bs[p][ty * RN + pn];
+                for (int pm = 0; pm < RM; ++pm)
+                    acc[pm][pn] += a_frag[pm] * b_frag[pn];
+        }
         __syncthreads();
     }
     if (m_row < m && n_col < n) {
