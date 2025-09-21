@@ -26,6 +26,9 @@ __global__ void gemm_shared_square_register_tile(const float* __restrict__ A,
     int m_row = blockIdx.x * BM + tx * RM; // row in C/A (M)
     int n_col = blockIdx.y * BN + ty * RN; // col in C/B (N)
 
+    const int threads_per_block = blockDim.x * blockDim.y;
+    const int lane_id = ty * blockDim.x + tx;
+
     float acc[RM][RN];
     #pragma unroll
     for (int m = 0; m < RM; m++)
@@ -34,48 +37,30 @@ __global__ void gemm_shared_square_register_tile(const float* __restrict__ A,
             acc[m][n] = 0.;
 
 
-    const int stride_k_A = BN; // blockDim.y * RN
-    const int stride_k_B = BM; // blockDim.x * RM
-
     // Iterate over K dimension in tiles
     for (int k0 = 0; k0 < k; k0 += BK) {
         // Load A tile (BM x BK)
-        for (int kk_base = ty * RN; kk_base < BK; kk_base += stride_k_A) {
-            #pragma unroll
-            for (int tm = 0; tm < RM; tm++) {
-                int shared_row = tx * RM + tm;
-                int global_row = m_row + tm;
-                if (shared_row >= BM) continue;
-                #pragma unroll
-                for (int tn = 0; tn < RN; tn++) {
-                    int kk = kk_base + tn;
-                    if (kk >= BK) break;
-                    float val = 0.f;
-                    if (global_row < m && (k0 + kk) < k)
-                        val = A[static_cast<size_t>(global_row) * k + (k0 + kk)];
-                    As[shared_row][kk] = val;
-                }
-            }
+        for (int idx = lane_id; idx < BM * BK; idx += threads_per_block) {
+            int local_row = idx / BK;
+            int local_col = idx % BK;
+            int global_row = blockIdx.x * BM + local_row;
+            int global_col = k0 + local_col;
+            float val = 0.f;
+            if (global_row < m && global_col < k)
+                val = A[static_cast<size_t>(global_row) * k + global_col];
+            As[local_row][local_col] = val;
         }
 
         // Load B tile (BK x BN)
-        for (int kk_base = tx * RM; kk_base < BK; kk_base += stride_k_B) {
-            #pragma unroll
-            for (int tm = 0; tm < RM; tm++) {
-                int kk = kk_base + tm;
-                if (kk >= BK) break;
-                int global_k = k0 + kk;
-                #pragma unroll
-                for (int tn = 0; tn < RN; tn++) {
-                    int shared_col = ty * RN + tn;
-                    if (shared_col >= BN) continue;
-                    float val = 0.f;
-                    int global_col = n_col + tn;
-                    if (global_k < k && global_col < n)
-                        val = B[static_cast<size_t>(global_k) * n + global_col];
-                    Bs[kk][shared_col] = val;
-                }
-            }
+        for (int idx = lane_id; idx < BK * BN; idx += threads_per_block) {
+            int local_row = idx / BN;
+            int local_col = idx % BN;
+            int global_row = k0 + local_row;
+            int global_col = blockIdx.y * BN + local_col;
+            float val = 0.f;
+            if (global_row < k && global_col < n)
+                val = B[static_cast<size_t>(global_row) * n + global_col];
+            Bs[local_row][local_col] = val;
         }
 
 
