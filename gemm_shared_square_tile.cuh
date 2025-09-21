@@ -17,8 +17,8 @@ __global__ void gemm_shared_square(const float* __restrict__ A,
     // Block tiles cover M (rows) and N (cols)
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-    int m_row = blockIdx.x * BM + ty; // row in C/A (M)
-    int n_col = blockIdx.y * BN + tx; // col in C/B (N)
+    int m_row = blockIdx.x * BM + tx; // row in C/A (M)
+    int n_col = blockIdx.y * BN + ty; // col in C/B (N)
 
     float acc = 0.f;
     constexpr int A_TILE = (BK + BN - 1) / BN;

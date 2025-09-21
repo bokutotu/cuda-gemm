@@ -16,6 +16,7 @@
 #include "gemm_shared_cp_async.cuh"
 #include "gemm_shared_register_tile.cuh"
 #include "gemm_shared_square_tile.cuh"
+#include "gemm_shared_square_register_tile.cuh"
 #include "gemm_cublas.h"
 
 // BLAS-style dimensions
@@ -151,6 +152,37 @@ inline GemmBenchData run_benchmarks(const GemmDims d = {}, int seed = 42, bool d
     }});
     tasks.push_back(Task{ "gemm_shared_register_tile_pingpong_float4", [=]() {
         gemm_shared_register_tile_pingpong_float4<<<grid_reg, block_reg>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+
+    tasks.push_back(Task{ "gemm_shared_square_register_tile_32x32x32_r4x4", [=]() {
+        constexpr int BM = 32;
+        constexpr int BN = 32;
+        constexpr int BK = 32;
+        constexpr int RM = 4;
+        constexpr int RN = 4;
+        const dim3 block(BM / RM, BN / RN);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square_register_tile<BM, BN, BK, RM, RN><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+    tasks.push_back(Task{ "gemm_shared_square_register_tile_32x32x64_r4x4", [=]() {
+        constexpr int BM = 32;
+        constexpr int BN = 32;
+        constexpr int BK = 64;
+        constexpr int RM = 4;
+        constexpr int RN = 4;
+        const dim3 block(BM / RM, BN / RN);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square_register_tile<BM, BN, BK, RM, RN><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
+    }});
+    tasks.push_back(Task{ "gemm_shared_square_register_tile_64x64x32_r8x4", [=]() {
+        constexpr int BM = 64;
+        constexpr int BN = 64;
+        constexpr int BK = 32;
+        constexpr int RM = 8;
+        constexpr int RN = 4;
+        const dim3 block(BM / RM, BN / RN);
+        const dim3 grid((d.M + BM - 1) / BM, (d.N + BN - 1) / BN);
+        gemm_shared_square_register_tile<BM, BN, BK, RM, RN><<<grid, block>>>(dA, dB, dC, d.M, d.N, d.K);
     }});
 
     // --- Execute, time, and validate each variant against golden ---

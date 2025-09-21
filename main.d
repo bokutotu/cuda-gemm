@@ -70,6 +70,7 @@ main.o : main.cu \
     gemm_shared_cp_async.cuh \
     gemm_shared_register_tile.cuh \
     gemm_shared_square_tile.cuh \
+    gemm_shared_square_register_tile.cuh \
     gemm_cublas.h
 
 /usr/local/cuda/bin/../targets/x86_64-linux/include/cuda_runtime.h:
@@ -213,5 +214,7 @@ gemm_shared_cp_async.cuh:
 gemm_shared_register_tile.cuh:
 
 gemm_shared_square_tile.cuh:
+
+gemm_shared_square_register_tile.cuh:
 
 gemm_cublas.h:
